@@ -1,0 +1,5 @@
+ALPACA_KEY=dein_api_key
+ALPACA_SECRET=dein_api_secret
+ALPACA_URL=https://paper-api.alpaca.markets
+TELEGRAM_TOKEN=dein_telegram_token
+TELEGRAM_CHAT_ID=344603231
