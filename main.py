@@ -164,6 +164,6 @@ def loop():
 
 # === START ===
 if __name__ == "__main__":
+    from threading import Thread
     Thread(target=lambda: app.run(host="0.0.0.0", port=8080)).start()
-    Thread(target=daily_report_loop).start()
     loop()
