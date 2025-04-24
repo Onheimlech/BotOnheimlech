@@ -1,4 +1,6 @@
+flask
+yfinance
 pandas
 ta
-alpaca-trade-api
 requests
+alpaca-trade-api
