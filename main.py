@@ -1,167 +1,169 @@
-import pandas as pd
-import ta
-import alpaca_trade_api as tradeapi
-import requests
+import os
 import time
+import json
 import logging
+import requests
+import pandas as pd
+import yfinance as yf
 from datetime import datetime, timedelta
+from ta.momentum import RSIIndicator
+from flask import Flask, request
+from threading import Thread
+import alpaca_trade_api as tradeapi
 
-# === API-Zugang ===
-TELEGRAM_TOKEN = '7883966444:AAHJfeC0EnX-Tjd1H5NPSM7zCXfntg_W2Bs'
-TELEGRAM_CHAT_ID = '344603231'
-API_KEY = 'PK7C24MFH67A20OUM22L'
-API_SECRET = 'rv7i3NAZzv9Tw8P9swBpaOcKP4omX6IJAKJGbgTY'
-BASE_URL = 'https://paper-api.alpaca.markets'
+# === KONFIGURATION ===
+API_KEY = "PK7C24MFH67A20OUM22L"
+API_SECRET = "rv7i3NAZzv9Tw8P9swBpaOcKP4omX6IJAKJGbgTY"
+BASE_URL = "https://paper-api.alpaca.markets"
+TELEGRAM_TOKEN = "7883966444:AAHJfeC0EnX-Tjd1H5NPSM7zCXfntg_W2Bs"
+TELEGRAM_CHAT_ID = "344603231"
 
-api = tradeapi.REST(API_KEY, API_SECRET, BASE_URL, api_version='v2')
-
-# === Einstellungen ===
-investment_per_week = 10000
-position_size = 2000
-weekly_profit = 0
-weekly_investment = 0
+# === INITIALISIERUNG ===
+app = Flask(__name__)
+api = tradeapi.REST(API_KEY, API_SECRET, BASE_URL)
 positions = {}
+weekly_profit = 0.0
+last_trade_msg = "Noch keine Trades."
 start_of_week = datetime.utcnow() - timedelta(days=datetime.utcnow().weekday())
 
-# === Logging ===
-logging.basicConfig(filename='bot.log', level=logging.INFO, format='%(asctime)s | %(message)s')
-def log(msg):
-    print(msg)
-    logging.info(msg)
+# === LOGGING ===
+logging.basicConfig(filename="bot.log", level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
+# === HELPER ===
 def send_telegram(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
+    try:
+        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
+    except Exception as e:
+        logging.error(f"Telegram-Fehler: {e}")
 
-# === Top 100 volatilste Aktien (Finviz, manuell eingebaut) ===
-tickers = [
-    'GME', 'MARA', 'RIOT', 'CVNA', 'NVDA', 'TSLA', 'AMD', 'UPST', 'AI', 'PATH',
-    'BIDU', 'BILI', 'RBLX', 'COIN', 'AFRM', 'PLTR', 'XPEV', 'NIO', 'LVS', 'FSLR',
-    'LCID', 'NKLA', 'RIVN', 'BABA', 'JD', 'SHOP', 'SQ', 'ROKU', 'NET', 'ZI',
-    'CRWD', 'ZS', 'SNOW', 'OKTA', 'DDOG', 'DOCU', 'UBER', 'LYFT', 'TNDM', 'ENPH',
-    'RUN', 'SPWR', 'SILK', 'BLNK', 'CHPT', 'BE', 'SPCE', 'ASTR', 'BB', 'BBBY',
-    'AMC', 'APE', 'BYND', 'DNUT', 'CVS', 'ROIV', 'CLSK', 'DNA', 'IONQ', 'SOUN',
-    'TSM', 'INTC', 'QCOM', 'MU', 'MRNA', 'PFE', 'BNTX', 'VRTX', 'REGN', 'BIIB',
-    'WOLF', 'SMCI', 'AVGO', 'AMZN', 'AAPL', 'META', 'GOOGL', 'MSFT', 'CRM',
-    'PANW', 'FTNT', 'ETSY', 'EBAY', 'W', 'FVRR', 'TGT', 'HD', 'NKE', 'DIS',
-    'WBD', 'PARA', 'SBUX', 'MCD', 'KO', 'PEP', 'T', 'VZ', 'BA', 'LMT', 'GE'
-]
-
-# === Sektor-Zuordnung (vereinfacht) ===
-sectors = {sym: 'Tech' for sym in tickers}
-sectors.update({'MARA': 'Crypto', 'RIOT': 'Crypto', 'COIN': 'Crypto', 'GME': 'Retail', 'AMC': 'Media'})
+def get_symbols():
+    if os.path.exists("tickers.csv"):
+        with open("tickers.csv", "r") as f:
+            return [line.strip() for line in f if line.strip()]
+    return ["TSLA", "NVDA", "AAPL", "AMD", "META", "MSFT", "GOOGL", "AMZN"]
 
 def analyze(symbol):
     try:
-        bars = api.get_bars(symbol, tradeapi.TimeFrame.Day, limit=100).df
-        if bars.empty or 'close' not in bars.columns:
+        df = yf.download(symbol, period="6mo", interval="1d", auto_adjust=True)
+        if df.empty or "Close" not in df.columns:
+            print(f"{symbol}: keine gültigen Preisdaten.")
             return None
-        bars["rsi"] = ta.momentum.RSIIndicator(bars["close"], window=14).rsi()
-        bars["ma200"] = bars["close"].rolling(200).mean()
-        bars["momentum"] = bars["close"].pct_change(20)
-        bars["avg_vol"] = bars["volume"].rolling(10).mean()
-        latest = bars.iloc[-1]
+
+        close = df["Close"].squeeze()
+        rsi = RSIIndicator(close).rsi()
+        ma = close.rolling(window=50).mean()
+
+        latest_price = close.iloc[-1]
+        latest_rsi = rsi.iloc[-1]
+        latest_ma = ma.iloc[-1]
+
+        print(f"{symbol} | RSI: {latest_rsi:.2f}, MA: {latest_ma:.2f}, Preis: {latest_price:.2f}")
+
         return {
-            "rsi": latest["rsi"],
-            "ma200": latest["ma200"],
-            "momentum": latest["momentum"],
-            "price": latest["close"],
-            "volume": latest["avg_vol"]
+            "rsi": latest_rsi,
+            "ma": latest_ma,
+            "price": latest_price
         }
+
     except Exception as e:
-        log(f"[{symbol}] Analyse-Fehler: {e}")
+        print(f"{symbol} Analysefehler: {e}")
+        logging.warning(f"{symbol} Analysefehler: {e}")
         return None
 
+# === TRADING-LOGIK ===
 def run_bot():
-    global weekly_profit, weekly_investment, start_of_week
+    global weekly_profit, start_of_week, last_trade_msg
+    trades_gemacht = False
 
     if datetime.utcnow() - start_of_week > timedelta(days=7):
-        weekly_profit = 0
-        weekly_investment = 0
-        positions.clear()
+        weekly_profit = 0.0
         start_of_week = datetime.utcnow()
-        send_telegram("Neue Woche gestartet. Statistik zurückgesetzt.")
-        log("Neue Woche gestartet.")
+        send_telegram("Neue Woche gestartet. Gewinn zurückgesetzt.")
+        logging.info("Neue Woche gestartet.")
 
-    sectors_in_portfolio = set([pos['sector'] for pos in positions.values()])
-    candidates = []
-
-    for symbol in tickers:
+    symbols = get_symbols()
+    for symbol in symbols:
         data = analyze(symbol)
-        if not data: continue
-        if pd.isna(data['rsi']) or pd.isna(data['ma200']) or pd.isna(data['momentum']): continue
-        if data["volume"] < 1_000_000: continue
-        if data["price"] < data["ma200"]: continue
-        candidates.append({
-            "symbol": symbol,
-            "rsi": data["rsi"],
-            "price": data["price"],
-            "momentum": data["momentum"],
-            "sector": sectors.get(symbol, "Unknown")
-        })
+        if not data or pd.isna(data["rsi"]) or pd.isna(data["ma"]):
+            continue
 
-    top_momentum = sorted(candidates, key=lambda x: x["momentum"], reverse=True)[:10]
+        price = data["price"]
+        qty = int(2000 // price)
 
-    for stock in top_momentum:
-        symbol = stock["symbol"]
-        rsi = stock["rsi"]
-        price = stock["price"]
-        sector = stock["sector"]
-        qty = int(position_size // price)
-
-        if symbol in positions and rsi > 70:
+        # BUY
+        if data["rsi"] < 35 and price > data["ma"] and symbol not in positions:
             try:
-                qty = positions[symbol]["qty"]
-                buy_price = positions[symbol]["buy_price"]
-                profit = (price - buy_price) * qty
-                weekly_profit += profit
-                api.submit_order(symbol=symbol, qty=qty, side='sell', type='market', time_in_force='gtc')
-                send_telegram(f"❌ SELL {symbol} ({qty} @ {price:.2f}) | Gewinn: CHF {profit:.2f}")
-                log(f"SELL {symbol} | Gewinn: CHF {profit:.2f}")
-                with open("trades.csv", "a") as f:
-                    f.write(f"{datetime.utcnow()},SELL,{symbol},{qty},{price:.2f},{profit:.2f}\n")
-                del positions[symbol]
+                api.submit_order(symbol=symbol, qty=qty, side='buy', type='market', time_in_force='gtc')
+                positions[symbol] = {"qty": qty, "buy_price": price}
+                msg = f"BUY {symbol} ({qty} @ {price:.2f})"
+                last_trade_msg = msg
+                send_telegram(msg)
+                logging.info(msg)
+                trades_gemacht = True
             except Exception as e:
-                log(f"Fehler bei SELL {symbol}: {e}")
+                logging.error(f"BUY-Fehler {symbol}: {e}")
 
-        elif rsi < 30 and symbol not in positions and sector not in sectors_in_portfolio:
-            total = price * qty
-            if weekly_investment + total <= investment_per_week:
+        # SELL
+        elif symbol in positions:
+            buy_price = positions[symbol]["buy_price"]
+            if data["rsi"] > 70 or price < buy_price * 0.9:
                 try:
-                    api.submit_order(symbol=symbol, qty=qty, side='buy', type='market', time_in_force='gtc')
-                    positions[symbol] = {"buy_price": price, "qty": qty, "sector": sector}
-                    weekly_investment += total
-                    send_telegram(f"✅ BUY {symbol} ({qty} @ {price:.2f}) | Sektor: {sector}")
-                    log(f"BUY {symbol} ({qty}) @ {price:.2f}")
-                    with open("trades.csv", "a") as f:
-                        f.write(f"{datetime.utcnow()},BUY,{symbol},{qty},{price:.2f},,\n")
+                    qty = positions[symbol]["qty"]
+                    profit = (price - buy_price) * qty
+                    weekly_profit += profit
+                    api.submit_order(symbol=symbol, qty=qty, side='sell', type='market', time_in_force='gtc')
+                    msg = f"SELL {symbol} | Gewinn: CHF {profit:.2f}"
+                    last_trade_msg = msg
+                    send_telegram(msg)
+                    logging.info(msg)
+                    del positions[symbol]
+                    trades_gemacht = True
                 except Exception as e:
-                    log(f"Fehler bei BUY {symbol}: {e}")
+                    logging.error(f"SELL-Fehler {symbol}: {e}")
 
-def send_daily_status():
-    if not positions:
-        msg = f"Täglicher Status (22:00):\nKeine offenen Positionen.\nWochenergebnis: CHF {weekly_profit:.2f}"
-    else:
-        msg = f"Täglicher Status (22:00):\nOffene Positionen:"
-        for sym, pos in positions.items():
-            current_price = api.get_last_trade(sym).price
-            profit = (current_price - pos["buy_price"]) * pos["qty"]
-            msg += f"\n• {sym}: {pos['qty']} Stk @ {pos['buy_price']:.2f} → {current_price:.2f} | Gewinn: CHF {profit:.2f}"
-        msg += f"\n\nWochenergebnis: CHF {weekly_profit:.2f}"
-    send_telegram(msg)
-    log("[Status] Täglicher Bericht gesendet.")
+    if not trades_gemacht:
+        send_telegram("Analyse abgeschlossen. Keine passenden Aktien für Kauf oder Verkauf gefunden.")
 
-send_telegram("Bot gestartet mit Top-100-Aktien & täglichem Status.")
-log("Bot vollständig gestartet.")
+# === MARKTZEITEN-CHECK ===
+def markt_ist_offen():
+    jetzt = datetime.utcnow() + timedelta(hours=2)  # CH-Zeit
+    return jetzt.weekday() < 5 and 15 <= jetzt.hour < 22  # Mo–Fr, 15:00–22:00
 
-last_report_date = None
+# === TELEGRAM WEBHOOK ===
+@app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
+def webhook():
+    global last_trade_msg
+    data = request.get_json()
+    if "message" in data and "text" in data["message"]:
+        msg = data["message"]["text"].strip().lower()
+        if msg == "/status":
+            status = f"Bot läuft.\nLetzter Trade:\n{last_trade_msg}"
+            send_telegram(status)
+    return "", 200
 
-while True:
-    now = datetime.utcnow()
-    run_bot()
+# === TÄGLICHER BERICHT ===
+def daily_report_loop():
+    while True:
+        now = datetime.utcnow() + timedelta(hours=2)  # CH-Zeit
+        if now.hour == 22 and now.minute == 0:
+            msg = f"Täglicher Bericht\nLetzter Trade:\n{last_trade_msg}\nAktueller Wochengewinn: CHF {weekly_profit:.2f}"
+            send_telegram(msg)
+            time.sleep(60)
+        time.sleep(30)
 
-    if now.hour == 20 and (last_report_date is None or last_report_date.date() != now.date()):
-        send_daily_status()
-        last_report_date = now
+# === MAIN LOOP ===
+def loop():
+    while True:
+        if markt_ist_offen():
+            logging.info("Markt ist offen – starte Analyse...")
+            run_bot()
+        else:
+            logging.info("Markt geschlossen – keine Analyse.")
+        time.sleep(900)  # 15 Minuten
 
-    time.sleep(3600)
+# === START ===
+if __name__ == "__main__":
+    Thread(target=lambda: app.run(host="0.0.0.0", port=8080)).start()
+    Thread(target=daily_report_loop).start()
+    loop()
